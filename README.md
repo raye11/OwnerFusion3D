@@ -12,7 +12,6 @@ external dependencies and are not redistributed in this repository.
 ## Repository layout
 
     ownerfusion3d/       OwnerFusion3D Python package
-    docs/                Method and reproduction notes
     examples/            Schemas and runnable single/multi-mask demos
     tests/               Lightweight unit and interface tests
     scripts/             Local release verification helpers
@@ -95,5 +94,3 @@ Run the lightweight checks before a full GPU generation:
     python -m ownerfusion3d.cli.fuse_parts --help
     python -m ownerfusion3d.cli.batch --help
     python -m ownerfusion3d.cli.batch_parts --help
-
-The complete method contract and implementation details are in docs/.
