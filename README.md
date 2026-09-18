@@ -76,7 +76,7 @@ ownerfusion3d-parts by the package metadata. Masks must be aligned to the
 structure image and defined in its camera view. They are jointly resized and
 cropped with the structure image before ownership estimation.
 
-## Paper configuration
+## Configuration
 
 The default paper configuration uses the frozen TRELLIS.2-4B generator, seed
 2026, four LR ownership-probe steps, the fixed stable_midlate_4 readout,
@@ -84,8 +84,7 @@ threshold 0.58, and conservative COR routing after local residual filling.
 The all_head readout and score_only COR mode are controlled ablations.
 
 Each run writes a final mesh.glb, a metadata.json, and optional sparse
-ownership diagnostics. These diagnostics describe the routing fields and are
-not ground-truth semantic segmentations.
+ownership diagnostics. 
 
 ## Verification
 
@@ -98,9 +97,3 @@ Run the lightweight checks before a full GPU generation:
     python -m ownerfusion3d.cli.batch_parts --help
 
 The complete method contract and implementation details are in docs/.
-
-## Anonymous review note
-
-This release intentionally contains no author names, institutional
-information, personal webpages, project pages, or non-anonymous repository
-links. The repository name and URL should remain anonymous during review.
