@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ownerfusion3d-anonymous"
+version = "1.0.0"
+description = "Anonymous OwnerFusion3D extension for mask-guided local image-to-3D fusion"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "Pillow",
+    "trimesh",
+]
+
+[project.scripts]
+ownerfusion3d = "ownerfusion3d.cli.run:main"
+ownerfusion3d-single = "ownerfusion3d.cli.fuse:main"
+ownerfusion3d-parts = "ownerfusion3d.cli.fuse_parts:main"
+ownerfusion3d-ablate = "ownerfusion3d.cli.ablate:main"
+ownerfusion3d-batch = "ownerfusion3d.cli.batch:main"
+ownerfusion3d-batch-parts = "ownerfusion3d.cli.batch_parts:main"
+
+[tool.setuptools.packages.find]
+include = ["ownerfusion3d*"]

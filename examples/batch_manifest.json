@@ -1,0 +1,10 @@
+{
+  "cases": [
+    {
+      "id": "example_case",
+      "structure": "inputs/structure.png",
+      "mask": "inputs/mask.png",
+      "content": "inputs/content.png"
+    }
+  ]
+}

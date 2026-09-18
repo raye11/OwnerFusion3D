@@ -1,0 +1,42 @@
+{
+  "parts": [
+    {
+      "name": "part_01",
+      "color": "#f11111"
+    },
+    {
+      "name": "part_02",
+      "color": "#0b4fb3"
+    },
+    {
+      "name": "part_03",
+      "color": "#179c45"
+    },
+    {
+      "name": "part_04",
+      "color": "#ffee00"
+    }
+  ],
+  "reference_groups": [
+    {
+      "name": "reference_01",
+      "content_image": "reference_01.png",
+      "parts": ["part_01"]
+    },
+    {
+      "name": "reference_02",
+      "content_image": "reference_02.png",
+      "parts": ["part_02"]
+    },
+    {
+      "name": "reference_03",
+      "content_image": "reference_03.png",
+      "parts": ["part_03"]
+    },
+    {
+      "name": "reference_04",
+      "content_image": "reference_04.png",
+      "parts": ["part_04"]
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "parts": [
+    {
+      "name": "left_arm",
+      "color": "#E67E22",
+      "mask": "inputs/left_arm_mask.png"
+    },
+    {
+      "name": "right_arm",
+      "color": "#3498DB",
+      "mask": "inputs/right_arm_mask.png"
+    }
+  ],
+  "reference_groups": [
+    {
+      "name": "left_arm_reference",
+      "content_image": "inputs/left_arm_reference.png",
+      "parts": ["left_arm"]
+    },
+    {
+      "name": "right_arm_reference",
+      "content_image": "inputs/right_arm_reference.png",
+      "parts": ["right_arm"]
+    }
+  ]
+}
