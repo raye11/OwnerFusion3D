@@ -53,7 +53,8 @@ class MOEConfig:
 class OEHRConfig:
     """Owner-exclusive hierarchical routing defaults."""
 
-    attention_chunk_size: int = 256
+    attention_chunk_size: int = 2048
+    attention_backend: str = "owner_grouped"
     shape_steps: int = 12
     texture_steps: int = 12
 
@@ -73,8 +74,8 @@ class CORConfig:
     assigned_neighbor_weight: float = 0.08
     fill_unassigned_iterations: int = 1
     # The final COR release uses conservative spatial resolution followed by
-    # bounded completion. Repair is disabled so it cannot silently change the
-    # ablation contract.
+    # bounded residual completion. Repair is disabled so it cannot silently
+    # change the ownership contract.
     repair_iterations: int = 0
     repair_connectivity: int = 18
     repair_min_neighbor_votes: int = 2
@@ -82,38 +83,36 @@ class CORConfig:
     repair_decisive_margin: float = 0.12
     repair_candidate_bonus: float = 0.05
     local_residual_fill: bool = True
-    local_residual_connectivity: int = 26
-    local_residual_min_neighbor_votes: int = 2
-    local_residual_min_neighbor_ratio: float = 0.55
-    local_residual_min_score: float = 0.30
-    local_residual_max_added_ratio: float = 0.20
-    local_residual_max_added_tokens: int = 512
-    boundary_completion: bool = True
-    boundary_connectivity: int = 26
-    boundary_min_neighbor_votes: int = 1
-    boundary_min_neighbor_ratio: float = 0.40
-    boundary_min_score: float = 0.25
-    boundary_min_score_margin: float = 0.0
-    boundary_max_added_ratio: float = 0.30
-    boundary_max_added_tokens: int = 512
-    hole_completion: bool = True
-    hole_connectivity: int = 26
-    hole_min_neighbor_votes: int = 2
-    hole_min_neighbor_ratio: float = 0.55
-    hole_max_competing_ratio: float = 0.45
-    hole_min_score: float = 0.10
-    hole_max_added_ratio: float = 0.15
-    hole_max_added_tokens: int = 512
-    # The reported COR owner is fully completed, while OEHR may route from a
-    # conservative snapshot to preserve narrow structural gaps.
-    routing_owner_stage: str = "after_local"
+    local_residual_connectivity: int = 18
+    local_residual_min_neighbor_votes: int = 4
+    local_residual_min_neighbor_ratio: float = 0.80
+    local_residual_min_score: float = 0.45
+    local_residual_max_added_ratio: float = 0.10
+    local_residual_max_added_tokens: int = 128
+    component_residual_completion: bool = True
+    component_residual_connectivity: int = 18
+    component_residual_max_component_tokens: int = 24
+    component_residual_min_boundary_votes: int = 4
+    component_residual_min_score: float = 0.35
+    component_residual_min_margin: float = 0.03
+    component_residual_max_added_ratio: float = 0.05
+    component_residual_max_added_tokens: int = 128
+    final_neighbor_assignment: bool = True
+    final_neighbor_connectivity: int = 6
+    final_neighbor_min_votes: int = 3
+    final_neighbor_min_ratio: float = 0.60
+    final_neighbor_force_completion: bool = True
+    conflict_correction: bool = True
+    conflict_correction_min_margin: float = 0.08
+    conflict_correction_min_neighbor_ratio: float = 0.60
 
 
 @dataclass(frozen=True)
 class MultiPartConfig:
     """Defaults for COR-based synchronized multi-reference fusion."""
 
-    attention_chunk_size: int = 256
+    attention_chunk_size: int = 2048
+    attention_backend: str = "owner_grouped"
 
 
 @dataclass(frozen=True)

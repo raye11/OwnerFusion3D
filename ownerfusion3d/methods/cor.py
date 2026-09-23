@@ -14,7 +14,6 @@ import torch
 
 class CORSettings(Protocol):
     mode: str
-    routing_owner_stage: str
     owner_connectivity: int
     owner_core_quantile: float
     owner_core_min_score: float
@@ -38,22 +37,22 @@ class CORSettings(Protocol):
     local_residual_min_score: float
     local_residual_max_added_ratio: float
     local_residual_max_added_tokens: int
-    boundary_completion: bool
-    boundary_connectivity: int
-    boundary_min_neighbor_votes: int
-    boundary_min_neighbor_ratio: float
-    boundary_min_score: float
-    boundary_min_score_margin: float
-    boundary_max_added_ratio: float
-    boundary_max_added_tokens: int
-    hole_completion: bool
-    hole_connectivity: int
-    hole_min_neighbor_votes: int
-    hole_min_neighbor_ratio: float
-    hole_max_competing_ratio: float
-    hole_min_score: float
-    hole_max_added_ratio: float
-    hole_max_added_tokens: int
+    component_residual_completion: bool
+    component_residual_connectivity: int
+    component_residual_max_component_tokens: int
+    component_residual_min_boundary_votes: int
+    component_residual_min_score: float
+    component_residual_min_margin: float
+    component_residual_max_added_ratio: float
+    component_residual_max_added_tokens: int
+    final_neighbor_assignment: bool
+    final_neighbor_connectivity: int
+    final_neighbor_min_votes: int
+    final_neighbor_min_ratio: float
+    final_neighbor_force_completion: bool
+    conflict_correction: bool
+    conflict_correction_min_margin: float
+    conflict_correction_min_neighbor_ratio: float
 
 
 def _neighbor_offsets(connectivity: int) -> list[tuple[int, int, int]]:
@@ -502,6 +501,249 @@ def _bounded_completion(
     return torch.as_tensor(owner_np, dtype=torch.long, device=owner.device), stats
 
 
+def _component_residual_completion(
+    *,
+    coords: torch.Tensor,
+    owner: torch.Tensor,
+    score_stack: list[torch.Tensor],
+    config: CORSettings,
+) -> tuple[torch.Tensor, dict]:
+    """Assign only small frozen owner-0 components with decisive support."""
+    owner_np = owner.detach().cpu().numpy().astype(np.int32, copy=True)
+    initial = int((owner_np == 0).sum())
+    selected_before = int((owner_np > 0).sum())
+    max_added = min(
+        max(int(config.component_residual_max_added_tokens), 0),
+        int(np.ceil(float(config.component_residual_max_added_ratio) * max(selected_before, 1))),
+    )
+    stats = {
+        "enabled": bool(config.component_residual_completion),
+        "initial_unassigned": initial,
+        "final_unassigned": initial,
+        "candidate_tokens": 0,
+        "reassigned_tokens": 0,
+        "max_added_tokens": max_added,
+    }
+    if not bool(config.component_residual_completion) or initial == 0 or not score_stack or max_added <= 0:
+        return owner, stats
+
+    scores = torch.stack(score_stack, dim=1).detach().cpu().numpy().astype(np.float32, copy=False)
+    frozen = owner_np.copy()
+    neighbors = _build_sparse_neighbors(coords, int(config.component_residual_connectivity))
+    unresolved = set(int(i) for i in np.flatnonzero(frozen == 0).tolist())
+    components: list[list[int]] = []
+    while unresolved:
+        seed = unresolved.pop()
+        queue: deque[int] = deque([seed])
+        component = [seed]
+        while queue:
+            idx = queue.popleft()
+            for nbr in neighbors[idx]:
+                nbr = int(nbr)
+                if nbr in unresolved:
+                    unresolved.remove(nbr)
+                    queue.append(nbr)
+                    component.append(nbr)
+        components.append(component)
+
+    proposals: list[tuple[float, list[int], int]] = []
+    for component in components:
+        if len(component) > int(config.component_residual_max_component_tokens):
+            continue
+        votes: dict[int, int] = {}
+        for idx in component:
+            for nbr in neighbors[idx]:
+                nbr_owner = int(frozen[int(nbr)])
+                if nbr_owner > 0:
+                    votes[nbr_owner] = votes.get(nbr_owner, 0) + 1
+        if not votes:
+            continue
+        ranked = sorted(votes.items(), key=lambda item: (-item[1], item[0]))
+        best_owner, best_votes = ranked[0]
+        second_votes = ranked[1][1] if len(ranked) > 1 else 0
+        total_votes = max(sum(votes.values()), 1)
+        margin = float((best_votes - second_votes) / total_votes)
+        mean_score = float(scores[np.asarray(component), best_owner - 1].mean())
+        if best_votes < int(config.component_residual_min_boundary_votes):
+            continue
+        if mean_score < float(config.component_residual_min_score):
+            continue
+        if margin < float(config.component_residual_min_margin):
+            continue
+        priority = float(best_votes / total_votes) * 100.0 + margin * 10.0 + mean_score
+        proposals.append((priority, component, int(best_owner)))
+
+    proposals.sort(key=lambda item: item[0], reverse=True)
+    accepted_tokens = 0
+    for _priority, component, best_owner in proposals:
+        if accepted_tokens + len(component) > max_added:
+            continue
+        owner_np[np.asarray(component, dtype=np.int32)] = best_owner
+        accepted_tokens += len(component)
+
+    stats.update(
+        {
+            "final_unassigned": int((owner_np == 0).sum()),
+            "candidate_tokens": int(sum(len(item[1]) for item in proposals)),
+            "reassigned_tokens": int(accepted_tokens),
+            "components_total": int(len(components)),
+            "connectivity": int(config.component_residual_connectivity),
+            "max_component_tokens": int(config.component_residual_max_component_tokens),
+            "min_boundary_votes": int(config.component_residual_min_boundary_votes),
+            "min_score": float(config.component_residual_min_score),
+            "min_margin": float(config.component_residual_min_margin),
+        }
+    )
+    return torch.as_tensor(owner_np, dtype=torch.long, device=owner.device), stats
+
+
+def _correct_categorical_conflicts(
+    *,
+    coords: torch.Tensor,
+    owner: torch.Tensor,
+    score_stack: list[torch.Tensor],
+    candidate_masks: list[torch.Tensor],
+    config: CORSettings,
+) -> tuple[torch.Tensor, dict]:
+    """Correct only ambiguous tokens with decisive score and local support."""
+    owner_np = owner.detach().cpu().numpy().astype(np.int32, copy=True)
+    initial_np = owner_np.copy()
+    stats = {
+        "enabled": bool(config.conflict_correction),
+        "initial_unassigned": int((owner_np == 0).sum()),
+        "candidate_conflicts": 0,
+        "corrected_tokens": 0,
+        "cleared_existing_tokens": 0,
+    }
+    if not bool(config.conflict_correction) or not score_stack or not candidate_masks:
+        stats["final_unassigned"] = int((owner_np == 0).sum())
+        return owner, stats
+
+    scores = torch.stack(score_stack, dim=1).detach().cpu().numpy().astype(np.float32, copy=False)
+    candidates = torch.stack(candidate_masks, dim=1).detach().cpu().numpy().astype(bool, copy=False)
+    neighbors = _build_sparse_neighbors(coords, int(config.owner_connectivity))
+    frozen = owner_np.copy()
+    proposals: list[tuple[int, int]] = []
+    for token_idx in range(owner_np.shape[0]):
+        parts = np.flatnonzero(candidates[token_idx])
+        if parts.size < 2:
+            continue
+        stats["candidate_conflicts"] += 1
+        values = scores[token_idx, parts]
+        order = np.argsort(values)[::-1]
+        best_part = int(parts[int(order[0])]) + 1
+        margin = float(values[int(order[0])] - values[int(order[1])])
+        if margin < float(config.conflict_correction_min_margin):
+            continue
+        assigned = [int(n) for n in neighbors[token_idx] if int(frozen[n]) > 0]
+        if not assigned:
+            continue
+        best_votes = sum(int(frozen[n] == best_part) for n in assigned)
+        ratio = float(best_votes / max(len(assigned), 1))
+        if ratio < float(config.conflict_correction_min_neighbor_ratio):
+            continue
+        if int(frozen[token_idx]) != best_part:
+            proposals.append((int(token_idx), int(best_part)))
+
+    for token_idx, best_part in proposals:
+        owner_np[token_idx] = best_part
+    stats.update(
+        {
+            "corrected_tokens": int(len(proposals)),
+            "cleared_existing_tokens": int(((initial_np > 0) & (owner_np == 0)).sum()),
+            "final_unassigned": int((owner_np == 0).sum()),
+        }
+    )
+    return torch.as_tensor(owner_np, dtype=torch.long, device=owner.device), stats
+
+
+def _final_neighbor_assignment(
+    *,
+    coords: torch.Tensor,
+    owner: torch.Tensor,
+    config: CORSettings,
+) -> tuple[torch.Tensor, dict]:
+    """Perform one frozen, non-propagating direct-neighbor closure pass."""
+    owner_np = owner.detach().cpu().numpy().astype(np.int32, copy=True)
+    initial_owner_np = owner_np.copy()
+    initial = int((owner_np == 0).sum())
+    stats = {
+        "enabled": bool(config.final_neighbor_assignment),
+        "initial_unassigned": initial,
+        "final_unassigned": initial,
+        "candidate_tokens": 0,
+        "reassigned_tokens": 0,
+        "propagation": False,
+        "force_completion": bool(config.final_neighbor_force_completion),
+        "forced_tokens": 0,
+        "cleared_existing_tokens": 0,
+    }
+    if not bool(config.final_neighbor_assignment) or initial == 0:
+        return owner, stats
+
+    neighbors = _build_sparse_neighbors(coords, int(config.final_neighbor_connectivity))
+    frozen = owner_np.copy()
+    proposals: list[tuple[int, int]] = []
+    for idx in np.flatnonzero(frozen == 0).tolist():
+        assigned = [int(nbr) for nbr in neighbors[int(idx)] if int(frozen[int(nbr)]) > 0]
+        if not assigned:
+            continue
+        votes: dict[int, int] = {}
+        for nbr in assigned:
+            value = int(frozen[nbr])
+            votes[value] = votes.get(value, 0) + 1
+        ranked = sorted(votes.items(), key=lambda item: (-item[1], item[0]))
+        best_owner, best_votes = ranked[0]
+        second_votes = ranked[1][1] if len(ranked) > 1 else 0
+        ratio = float(best_votes / max(len(assigned), 1))
+        if best_votes < int(config.final_neighbor_min_votes):
+            continue
+        if ratio < float(config.final_neighbor_min_ratio) or best_votes <= second_votes:
+            continue
+        proposals.append((int(idx), int(best_owner)))
+
+    for idx, best_owner in proposals:
+        owner_np[idx] = best_owner
+
+    if bool(config.final_neighbor_force_completion):
+        unresolved = set(int(i) for i in np.flatnonzero(owner_np == 0).tolist())
+        queue: deque[int] = deque(int(i) for i in np.flatnonzero(owner_np > 0).tolist())
+        propagated = owner_np.copy()
+        while queue and unresolved:
+            token_idx = int(queue.popleft())
+            source_owner = int(propagated[token_idx])
+            for nbr in neighbors[token_idx]:
+                nbr_idx = int(nbr)
+                if nbr_idx not in unresolved:
+                    continue
+                propagated[nbr_idx] = source_owner
+                unresolved.remove(nbr_idx)
+                queue.append(nbr_idx)
+
+        if unresolved:
+            owned = np.flatnonzero(propagated > 0)
+            if owned.size:
+                coord_np = coords[:, 1:].detach().cpu().numpy().astype(np.int32, copy=False)
+                for token_idx in sorted(unresolved):
+                    delta = coord_np[owned] - coord_np[int(token_idx)]
+                    nearest = int(owned[int(np.argmin(np.sum(delta * delta, axis=1)))])
+                    propagated[int(token_idx)] = int(propagated[nearest])
+        owner_np = propagated
+    stats.update(
+        {
+            "final_unassigned": int((owner_np == 0).sum()),
+            "candidate_tokens": int(len(proposals)),
+            "reassigned_tokens": int(len(proposals)),
+            "connectivity": int(config.final_neighbor_connectivity),
+            "min_neighbor_votes": int(config.final_neighbor_min_votes),
+            "min_neighbor_ratio": float(config.final_neighbor_min_ratio),
+            "forced_tokens": int(((initial_owner_np == 0) & (owner_np > 0)).sum() - len(proposals)),
+            "cleared_existing_tokens": int(((initial_owner_np > 0) & (owner_np == 0)).sum()),
+        }
+    )
+    return torch.as_tensor(owner_np, dtype=torch.long, device=owner.device), stats
+
+
 def complete_categorical_ownership(
     *,
     coords: torch.Tensor,
@@ -510,14 +752,13 @@ def complete_categorical_ownership(
     candidate_masks: list[torch.Tensor],
     config: CORSettings,
 ) -> tuple[torch.Tensor, dict]:
-    """Final bounded local, boundary, and enclosed-hole COR completion."""
+    """Apply the final bounded residual completion contract."""
     current, _routing_owner, stats = complete_categorical_ownership_with_routing(
         coords=coords,
         owner=owner,
         score_stack=score_stack,
         candidate_masks=candidate_masks,
         config=config,
-        routing_owner_stage="after_full",
     )
     return current, stats
 
@@ -529,32 +770,46 @@ def complete_categorical_ownership_with_routing(
     score_stack: list[torch.Tensor],
     candidate_masks: list[torch.Tensor],
     config: CORSettings,
-    routing_owner_stage: str = "after_full",
 ) -> tuple[torch.Tensor, torch.Tensor, dict]:
-    """Complete COR and return a separately selected owner for OEHR routing."""
+    """Complete COR and route OEHR from the same final ownership field.
+
+    Boundary/hole completion and snapshot routing are intentionally not part
+    of the released method.
+    """
     current = owner
     stage_stats = {}
-    routing_owner = owner
-    for kind in ("local", "boundary", "hole"):
-        current, stage_stats[kind] = _bounded_completion(
-            coords=coords,
-            owner=current,
-            score_stack=score_stack,
-            candidate_masks=candidate_masks,
-            config=config,
-            kind=kind,
-        )
-        if str(routing_owner_stage) == f"after_{kind}":
-            routing_owner = current.clone()
-    if str(routing_owner_stage) == "after_full":
-        routing_owner = current.clone()
-    elif str(routing_owner_stage) == "after_core":
-        routing_owner = owner.clone()
+    current, stage_stats["local"] = _bounded_completion(
+        coords=coords,
+        owner=current,
+        score_stack=score_stack,
+        candidate_masks=candidate_masks,
+        config=config,
+        kind="local",
+    )
+    current, stage_stats["component"] = _component_residual_completion(
+        coords=coords,
+        owner=current,
+        score_stack=score_stack,
+        config=config,
+    )
+    current, stage_stats["conflict_correction"] = _correct_categorical_conflicts(
+        coords=coords,
+        owner=current,
+        score_stack=score_stack,
+        candidate_masks=candidate_masks,
+        config=config,
+    )
+    current, stage_stats["final_neighbor"] = _final_neighbor_assignment(
+        coords=coords,
+        owner=current,
+        config=config,
+    )
+    routing_owner = current.clone()
     return current, routing_owner, {
-        "mode": "bounded_completion",
+        "mode": "residual_completion",
         "initial_unassigned": int((owner == 0).sum().item()),
         "final_unassigned": int((current == 0).sum().item()),
-        "routing_owner_stage": str(routing_owner_stage),
+        "routing_owner_stage": "after_full",
         "stages": stage_stats,
     }
 
@@ -580,15 +835,27 @@ def lift_categorical_ownership(
     else:
         lr_value_np = lr_values.detach().cpu().numpy().astype(np.int64, copy=False)
         out_dtype = np.int64
-    value_by_coord = {tuple(coord.tolist()): value for coord, value in zip(lr_np, lr_value_np.tolist())}
+    values = np.asarray(lr_value_np)
+    value_by_coord = {tuple(coord.tolist()): value for coord, value in zip(lr_np, values.tolist())}
+    nonzero_indices = np.flatnonzero(values != 0)
+    fallback_indices = nonzero_indices if nonzero_indices.size else np.arange(len(values), dtype=np.int32)
 
     hr_np = hr_coords[:, 1:].detach().cpu().numpy().astype(np.int32, copy=False)
     parent = np.floor(hr_np.astype(np.float32) * scale).astype(np.int32, copy=False)
     parent = np.clip(parent, 0, max(lr_grid - 1, 0))
-    out_np = np.array(
-        [value_by_coord.get(tuple(coord.tolist()), default_value) for coord in parent],
-        dtype=out_dtype,
-    )
+    out_values = []
+    for parent_coord in parent:
+        exact = value_by_coord.get(tuple(parent_coord.tolist()))
+        if exact is not None:
+            out_values.append(exact)
+            continue
+        if fallback_indices.size == 0:
+            out_values.append(default_value)
+            continue
+        delta = lr_np[fallback_indices] - parent_coord
+        nearest = int(fallback_indices[int(np.argmin(np.sum(delta * delta, axis=1)))])
+        out_values.append(values[nearest])
+    out_np = np.asarray(out_values, dtype=out_dtype)
     return torch.as_tensor(out_np, dtype=dtype, device=hr_coords.device)
 
 

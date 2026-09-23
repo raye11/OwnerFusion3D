@@ -16,6 +16,11 @@ class CLITest(unittest.TestCase):
         self.assertEqual(args.moe_probe_steps, 4)
         self.assertEqual(args.moe_readout, "stable_midlate_4")
         self.assertEqual(args.attention_chunk_size, 256)
+        self.assertEqual(args.cor_mode, "full")
+        self.assertEqual(args.oehr_attention_backend, "owner_grouped")
+        self.assertTrue(args.owner_local_residual_fill)
+        self.assertTrue(args.owner_component_residual_completion)
+        self.assertTrue(args.owner_final_neighbor_assignment)
 
     def test_probe_step_override(self):
         args = fuse_parser().parse_args(

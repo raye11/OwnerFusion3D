@@ -20,6 +20,16 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(payload["moe"]["threshold"], 0.58)
         self.assertEqual(payload["moe"]["max_selected_ratio"], 1.0)
         self.assertEqual(payload["oehr"]["attention_chunk_size"], 256)
+        self.assertEqual(payload["oehr"]["attention_backend"], "owner_grouped")
+        self.assertEqual(payload["cor"]["mode"], "full")
+        self.assertTrue(payload["cor"]["local_residual_fill"])
+        self.assertTrue(payload["cor"]["component_residual_completion"])
+        self.assertTrue(payload["cor"]["final_neighbor_assignment"])
+        self.assertEqual(payload["cor"]["local_residual_connectivity"], 18)
+        self.assertEqual(payload["cor"]["component_residual_connectivity"], 18)
+        self.assertEqual(payload["cor"]["final_neighbor_connectivity"], 6)
+        self.assertEqual(payload["cor"]["final_neighbor_min_votes"], 3)
+        self.assertEqual(payload["cor"]["final_neighbor_min_ratio"], 0.60)
 
     def test_attention_chunk_size_is_shared_by_single_and_multi_routes(self):
         args = fuse_parser().parse_args(

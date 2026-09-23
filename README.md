@@ -79,8 +79,7 @@ cropped with the structure image before ownership estimation.
 
 The default paper configuration uses the frozen TRELLIS.2-4B generator, seed
 2026, four LR ownership-probe steps, the fixed stable_midlate_4 readout,
-threshold 0.58, and conservative COR routing after local residual filling.
-The all_head readout and score_only COR mode are controlled ablations.
+threshold 0.58. 
 
 Each run writes a final mesh.glb, a metadata.json, and optional sparse
 ownership diagnostics. 

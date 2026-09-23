@@ -58,23 +58,22 @@ def _cor_namespace(config) -> SimpleNamespace:
         local_residual_min_score=config.local_residual_min_score,
         local_residual_max_added_ratio=config.local_residual_max_added_ratio,
         local_residual_max_added_tokens=config.local_residual_max_added_tokens,
-        boundary_completion=config.boundary_completion,
-        boundary_connectivity=config.boundary_connectivity,
-        boundary_min_neighbor_votes=config.boundary_min_neighbor_votes,
-        boundary_min_neighbor_ratio=config.boundary_min_neighbor_ratio,
-        boundary_min_score=config.boundary_min_score,
-        boundary_min_score_margin=config.boundary_min_score_margin,
-        boundary_max_added_ratio=config.boundary_max_added_ratio,
-        boundary_max_added_tokens=config.boundary_max_added_tokens,
-        hole_completion=config.hole_completion,
-        hole_connectivity=config.hole_connectivity,
-        hole_min_neighbor_votes=config.hole_min_neighbor_votes,
-        hole_min_neighbor_ratio=config.hole_min_neighbor_ratio,
-        hole_max_competing_ratio=config.hole_max_competing_ratio,
-        hole_min_score=config.hole_min_score,
-        hole_max_added_ratio=config.hole_max_added_ratio,
-        hole_max_added_tokens=config.hole_max_added_tokens,
-        routing_owner_stage=config.routing_owner_stage,
+        component_residual_completion=config.component_residual_completion,
+        component_residual_connectivity=config.component_residual_connectivity,
+        component_residual_max_component_tokens=config.component_residual_max_component_tokens,
+        component_residual_min_boundary_votes=config.component_residual_min_boundary_votes,
+        component_residual_min_score=config.component_residual_min_score,
+        component_residual_min_margin=config.component_residual_min_margin,
+        component_residual_max_added_ratio=config.component_residual_max_added_ratio,
+        component_residual_max_added_tokens=config.component_residual_max_added_tokens,
+        final_neighbor_assignment=config.final_neighbor_assignment,
+        final_neighbor_connectivity=config.final_neighbor_connectivity,
+        final_neighbor_min_votes=config.final_neighbor_min_votes,
+        final_neighbor_min_ratio=config.final_neighbor_min_ratio,
+        final_neighbor_force_completion=config.final_neighbor_force_completion,
+        conflict_correction=config.conflict_correction,
+        conflict_correction_min_margin=config.conflict_correction_min_margin,
+        conflict_correction_min_neighbor_ratio=config.conflict_correction_min_neighbor_ratio,
     )
 
 
@@ -181,13 +180,13 @@ class MultiPartOwnerFusionPipeline:
                 score_stack=scores,
                 candidate_masks=candidates,
                 config=cor_config,
-                routing_owner_stage=cor_config.routing_owner_stage,
             )
 
         part_index = {part.name: index for index, part in enumerate(manifest.parts, start=1)}
-        # Report and export the fully completed owner, but route OEHR from the
-        # conservative snapshot selected by COR for narrow structural gaps.
-        routing_part_owner_lr = locals().get("routing_part_owner_lr", part_owner_lr)
+        # The released method routes OEHR from the same fully completed COR
+        # field that is reported and exported.  Keep the routing variable for
+        # backwards-compatible metadata/output names only.
+        routing_part_owner_lr = part_owner_lr
         group_owner_lr = torch.zeros_like(routing_part_owner_lr, dtype=torch.long)
         group_conditions_512 = []
         group_conditions_1024 = []
@@ -218,6 +217,7 @@ class MultiPartOwnerFusionPipeline:
             "regional_group_owner": group_owner_lr,
             "regional_key_group_index": key_groups_512,
             "regional_attention_mode": "exclusive",
+            "regional_grouped_attention": self.config.multipart.attention_backend == "owner_grouped",
             "steps": self.config.oehr.shape_steps,
         }
         shape_lr = sample_shape_with_regional_attention(
@@ -232,9 +232,8 @@ class MultiPartOwnerFusionPipeline:
         coordinates_hr, resolution = build_hr_coords_from_lr_shape(
             self.backbone, shape_lr, 512, self.config.output_resolution, self.config.max_num_tokens
         )
-        # Keep both lifted fields: the fully completed COR field is for
-        # diagnostics, while the conservative field is the one actually
-        # consumed by OEHR at HR shape and texture resolution.
+        # Lift the same final COR field that was used by LR routing.  The
+        # duplicated routing variable is retained only for output compatibility.
         part_owner_hr = cor.lift_categorical_ownership(
             lr_coords=coordinates_lr,
             lr_values=part_owner_lr,
@@ -272,6 +271,7 @@ class MultiPartOwnerFusionPipeline:
             "regional_group_owner": group_owner_hr,
             "regional_key_group_index": key_groups_1024,
             "regional_attention_mode": "exclusive",
+            "regional_grouped_attention": self.config.multipart.attention_backend == "owner_grouped",
             "steps": self.config.oehr.shape_steps,
         }
         shape = sample_shape_with_regional_attention(
@@ -328,6 +328,21 @@ class MultiPartOwnerFusionPipeline:
             save_categorical_owner_ply(coordinates_hr, group_owner_hr, group_colors, ownership_dir / "source_owner_hr.ply", resolution)
             save_owner_glb(coordinates_hr, group_owner_hr > 0, ownership_dir / "source_owner_hr.glb", resolution)
 
+        completion_stages = completion_stats.get("stages", {}) if isinstance(completion_stats, dict) else {}
+        conflict_stage = completion_stages.get("conflict_correction", {})
+        neighbor_stage = completion_stages.get("final_neighbor", {})
+        ownership_audit = {
+            "initial_owner_zero": int(completion_stats.get("initial_unassigned", cor_stats.get("unassigned_tokens", 0))),
+            "final_owner_zero": int((routing_part_owner_lr == 0).sum().item()),
+            "candidate_conflicts": int(cor_stats.get("conflict_tokens", 0)),
+            "corrected_tokens": int(conflict_stage.get("corrected_tokens", 0)),
+            "forced_tokens": int(neighbor_stage.get("forced_tokens", 0)),
+            "cleared_existing_tokens": int(
+                conflict_stage.get("cleared_existing_tokens", 0)
+                + neighbor_stage.get("cleared_existing_tokens", 0)
+            ),
+        }
+
         write_metadata(
             metadata_path,
             {
@@ -346,14 +361,12 @@ class MultiPartOwnerFusionPipeline:
                 "cor": cor_stats,
                 "cor_repair": repair_stats,
                 "cor_completion": completion_stats,
+                "ownership_audit": ownership_audit,
                 "cor_routing": {
-                    "owner_stage": str(cor_config.routing_owner_stage),
+                    "owner_stage": "after_full",
                     "assigned_lr_tokens": int((routing_part_owner_lr > 0).sum().item()),
                     "unassigned_lr_tokens": int((routing_part_owner_lr == 0).sum().item()),
-                    "owner_source": (
-                        "fully_completed_cor" if str(cor_config.routing_owner_stage) == "after_full"
-                        else "cor_snapshot_at_selected_stage"
-                    ),
+                    "owner_source": "fully_completed_cor",
                 },
                 "lr_tokens": int(coordinates_lr.shape[0]),
                 "hr_tokens": int(coordinates_hr.shape[0]),

@@ -321,6 +321,30 @@ class RegionalSparseCrossAttention(nn.Module):
                     f"Key group index length {key_group_index.shape[0]} does not match "
                     f"attention key count {key_count}."
                 )
+        if bool(kwargs.get("regional_grouped_attention", False)):
+            if self.probe_state is not None:
+                raise ValueError("Grouped owner attention is only valid during synthesis, not MOE probing.")
+            if group_owner is None or key_group_index is None:
+                raise ValueError(
+                    "regional_grouped_attention requires regional_group_owner and "
+                    "regional_key_group_index."
+                )
+            if attention_mode != "exclusive":
+                raise ValueError(
+                    "regional_grouped_attention requires regional_attention_mode='exclusive'."
+                )
+            out_feats = self._owner_grouped_attention(
+                q_feats=q_feats,
+                k_feats=k_feats,
+                v_feats=v_feats,
+                group_owner=group_owner,
+                key_group_index=key_group_index,
+                chunk_size=chunk_size,
+            )
+            h = q.replace(out_feats)
+            h = self.parent._reshape_chs(h, (-1,))
+            h = self.parent._linear(self.parent.to_out, h)
+            return h
         scale = 1.0 / math.sqrt(float(head_dim))
         selected_probe_indices = None
         background_probe_indices = None
@@ -518,6 +542,54 @@ class RegionalSparseCrossAttention(nn.Module):
         allowed = row_group_owner.unsqueeze(1) == key_group_index.unsqueeze(0)
         gated_scores = gated_scores.masked_fill(~allowed.unsqueeze(0), off_value)
         return gated_scores
+
+    @staticmethod
+    def _owner_grouped_attention(
+        *,
+        q_feats: torch.Tensor,
+        k_feats: torch.Tensor,
+        v_feats: torch.Tensor,
+        group_owner: torch.Tensor,
+        key_group_index: torch.Tensor,
+        chunk_size: int,
+    ) -> torch.Tensor:
+        """Evaluate strict owner attention without materializing blocked keys."""
+        if q_feats.ndim != 3 or k_feats.ndim != 3 or v_feats.ndim != 3:
+            raise ValueError("Owner-grouped attention expects [heads, tokens, channels] tensors.")
+        if k_feats.shape != v_feats.shape:
+            raise ValueError("Owner-grouped attention requires matching K and V shapes.")
+        if q_feats.shape[0] != k_feats.shape[0] or q_feats.shape[2] != k_feats.shape[2]:
+            raise ValueError("Owner-grouped attention Q/K head dimensions must match.")
+        token_count = int(q_feats.shape[1])
+        if int(group_owner.numel()) != token_count:
+            raise ValueError("Owner-grouped attention owner length does not match query tokens.")
+        if int(key_group_index.numel()) != int(k_feats.shape[1]):
+            raise ValueError("Owner-grouped attention key-group length does not match keys.")
+
+        scale = 1.0 / math.sqrt(float(q_feats.shape[-1]))
+        out_by_head = torch.empty_like(q_feats)
+        step = max(int(chunk_size), 1)
+        for owner_value in torch.unique(group_owner, sorted=True).tolist():
+            owner_value = int(owner_value)
+            query_indices = torch.nonzero(group_owner == owner_value, as_tuple=False).flatten()
+            key_indices = torch.nonzero(key_group_index == owner_value, as_tuple=False).flatten()
+            if query_indices.numel() == 0:
+                continue
+            if key_indices.numel() == 0:
+                raise ValueError(
+                    f"Owner-grouped attention found queries for owner group {owner_value}, "
+                    "but no matching condition keys."
+                )
+            k_group = k_feats.index_select(1, key_indices)
+            v_group = v_feats.index_select(1, key_indices)
+            for start in range(0, int(query_indices.numel()), step):
+                chunk_indices = query_indices[start : start + step]
+                q_chunk = q_feats.index_select(1, chunk_indices)
+                scores = torch.matmul(q_chunk, k_group.transpose(-2, -1)) * scale
+                probs = torch.softmax(scores.float(), dim=-1)
+                out_chunk = torch.matmul(probs.to(v_group.dtype), v_group)
+                out_by_head.index_copy_(1, chunk_indices, out_chunk)
+        return out_by_head.permute(1, 0, 2).contiguous()
 
 
 @contextmanager

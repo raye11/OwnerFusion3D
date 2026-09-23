@@ -8,5 +8,8 @@ The package imports trellis2 and o_voxel from the active TRELLIS.2
 environment. It does not contain the TRELLIS.2 backbone or model weights.
 
 Use the repository-level README.md for installation and command examples.
-Use docs/METHOD.md, docs/COR_METHOD.md, and docs/REPRODUCTION.md for the
-method contract and reproducibility notes.
+Use the repository README for the method contract and reproducibility notes.
+The default multi-part route is full COR followed by local residual fill,
+small-component residual completion, constrained conflict correction, and
+monotone owner-zero completion before owner-grouped OEHR. Existing nonzero
+owners are preserved; completion only fills unresolved ownership entries.
