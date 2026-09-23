@@ -1,5 +1,7 @@
 # OwnerFusion3D Anonymous Release
 
+![OwnerFusion3D overview](assets/overview.png)
+
 This repository contains the OwnerFusion3D extension for training-free,
 mask-guided local image-to-3D fusion. It is intended for anonymous review and
 provides the implementation, configuration defaults, input schemas, and
